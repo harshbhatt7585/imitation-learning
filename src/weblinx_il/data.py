@@ -11,6 +11,7 @@ away the very element the model must select).
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -18,12 +19,20 @@ import torch
 from torch.utils.data import Dataset
 
 from .text import BOS, encode
+from .actions import parse_action
 
 
 DATASET_ID = "McGill-NLP/weblinx"
 
 HISTORY_MAX_CHARS = 1500          # cap dialogue/history text before tokenizing
 _CAND_UID_RE = re.compile(r"\(\s*uid\s*=\s*([^)\s]+)\s*\)")
+_CAND_SECTION_RE = re.compile(r"\[\[(.*?)\]\]")
+_BBOX_RE = re.compile(
+    r"x=(?P<x>[-+]?\d+(?:\.\d+)?)\s+"
+    r"y=(?P<y>[-+]?\d+(?:\.\d+)?)\s+"
+    r"width=(?P<width>[-+]?\d+(?:\.\d+)?)\s+"
+    r"height=(?P<height>[-+]?\d+(?:\.\d+)?)"
+)
 
 
 def require_datasets():
@@ -91,6 +100,119 @@ def candidate_uids(cand_lines) -> list[str]:
         if m:
             uids.append(m.group(1))
     return uids
+
+
+def _candidate_sections(line: str) -> dict[str, str]:
+    matches = list(_CAND_SECTION_RE.finditer(line))
+    sections: dict[str, str] = {}
+    for i, match in enumerate(matches):
+        name = match.group(1).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
+        sections[name] = line[start:end].strip()
+    return sections
+
+
+def parse_candidate_line(line: str, index: int, gold_uid: str | None = None) -> dict:
+    """Parse one WebLINX candidate line into structured fields."""
+    uid_match = _CAND_UID_RE.search(line)
+    uid = uid_match.group(1) if uid_match else None
+    sections = _candidate_sections(line)
+    bbox = None
+    bbox_match = _BBOX_RE.search(sections.get("bbox", ""))
+    if bbox_match:
+        bbox = {k: float(v) for k, v in bbox_match.groupdict().items()}
+    return {
+        "index": index,
+        "uid": uid,
+        "tag": sections.get("tag", ""),
+        "xpath": sections.get("xpath", ""),
+        "text": sections.get("text", ""),
+        "bbox": bbox,
+        "attributes": sections.get("attributes", ""),
+        "children": sections.get("children", ""),
+        "raw": line,
+        "is_gold": bool(gold_uid and uid == gold_uid),
+    }
+
+
+def action_to_struct(raw_action: str) -> dict:
+    """Parse a WebLINX action string into model-head-friendly fields."""
+    action = parse_action(raw_action)
+    if action is None:
+        return {
+            "raw": raw_action,
+            "parse_ok": False,
+            "intent": None,
+            "uid": None,
+            "text": None,
+            "url": None,
+            "args": {},
+            "is_element": False,
+            "is_text": False,
+        }
+    return {
+        "raw": raw_action,
+        "parse_ok": True,
+        "intent": action.intent,
+        "uid": action.uid,
+        "text": action.text,
+        "url": action.url,
+        "args": action.args,
+        "is_element": action.is_element,
+        "is_text": action.is_text,
+    }
+
+
+def structured_example(fields: dict) -> dict:
+    """Convert `record_fields` output into explicit supervised-action fields.
+
+    The resulting record is suitable for an action-head model:
+
+    - `dialogue`, `history`, `viewport`: language/context inputs
+    - `candidates`: current DOM action choices with `is_gold` labels
+    - `action`: parsed target action
+    - `labels`: normalized targets for intent, element, text, and URL heads
+    """
+    action = action_to_struct(fields["target"])
+    candidates = [
+        parse_candidate_line(line, i, gold_uid=action["uid"])
+        for i, line in enumerate(fields.get("candidate_lines", []))
+    ]
+    gold_candidate_index = None
+    for cand in candidates:
+        if cand["is_gold"]:
+            gold_candidate_index = cand["index"]
+            break
+    prompt = fields.get("prebuilt_prompt") or full_prompt(fields)
+    return {
+        "viewport": fields.get("viewport", ""),
+        "dialogue": fields.get("dialogue", ""),
+        "history": fields.get("history", ""),
+        "prompt": prompt,
+        "candidates": candidates,
+        "action": action,
+        "labels": {
+            "intent": action["intent"],
+            "element_uid": action["uid"],
+            "element_index": gold_candidate_index,
+            "text": action["text"],
+            "url": action["url"],
+            "raw_action": fields["target"],
+        },
+    }
+
+
+def load_structured_examples(
+    split: str, limit: int | None = None, dataset_id: str = DATASET_ID
+) -> list[dict]:
+    return [structured_example(ex) for ex in load_examples(split, limit, dataset_id)]
+
+
+def write_jsonl(rows, path) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def build_prompt(viewport: str, dialogue: str, history: str, candidates: str) -> str:

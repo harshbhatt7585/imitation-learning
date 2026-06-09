@@ -95,6 +95,12 @@ WebLINX records.
 # Inspect raw WebLINX records and fields.
 uv run python -m weblinx_il.inspect --split validation --n 2
 
+# Export clean structured records for action-head models.
+uv run python -m weblinx_il.export_structured \
+  --split train \
+  --limit 1000 \
+  --out data/weblinx/train_structured.jsonl
+
 # Train a small prompt -> action string baseline on a subset.
 uv run python -m weblinx_il.train --train-limit 2000 --val-limit 300
 
