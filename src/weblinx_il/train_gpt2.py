@@ -1,91 +1,42 @@
-"""Fine-tune GPT-2 for WebLINX prompt -> action-string imitation."""
+"""Fine-tune GPT-2 for WebLINX prompt -> action imitation (deployment-grade).
+
+Improvements over a plain LM fine-tune:
+  * candidate-aware prompt assembly (keeps the gold element in context),
+  * warmup + cosine LR schedule with gradient clipping,
+  * checkpointing on the **task metric** (overall WebLINX-style score from
+    generated actions), not teacher-forced loss,
+  * early stopping on that metric and a saved JSON eval report.
+"""
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .data import DATASET_ID, load_pairs
+from .data import DATASET_ID, load_examples
+from .gpt2_common import (
+    ACTION_PREFIX,  # noqa: F401  (re-exported for predict/live imports)
+    GPT2WebLinxDataset,
+    generate_predictions,
+    pick_device,
+    require_transformers,
+)
+from .metrics import aggregate
 
 
-ACTION_PREFIX = "\n\nAction: "
-
-
-def require_transformers():
-    try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Install transformers first: uv sync or .venv/bin/python -m pip install transformers"
-        ) from exc
-    return AutoModelForCausalLM, AutoTokenizer
-
-
-class GPT2WebLinxDataset(Dataset):
-    def __init__(self, pairs, tokenizer, max_length: int, max_action_tokens: int):
-        self.pairs = pairs
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.max_action_tokens = max_action_tokens
-
-    def __len__(self):
-        return len(self.pairs)
-
-    def __getitem__(self, idx: int):
-        prompt, action = self.pairs[idx]
-        prompt_text = str(prompt).strip() + ACTION_PREFIX
-        prompt_ids = self.tokenizer(
-            prompt_text,
-            add_special_tokens=False,
-            verbose=False,
-        )["input_ids"]
-        action_ids = self.tokenizer(
-            str(action).strip() + self.tokenizer.eos_token,
-            add_special_tokens=False,
-            verbose=False,
-        )["input_ids"][: self.max_action_tokens]
-
-        prompt_budget = max(1, self.max_length - len(action_ids))
-        prompt_ids = prompt_ids[-prompt_budget:]
-        input_ids = prompt_ids + action_ids
-        labels = [-100] * len(prompt_ids) + action_ids
-        attention_mask = [1] * len(input_ids)
-
-        pad = self.max_length - len(input_ids)
-        if pad > 0:
-            input_ids += [self.tokenizer.pad_token_id] * pad
-            attention_mask += [0] * pad
-            labels += [-100] * pad
-
-        return (
-            torch.tensor(input_ids[: self.max_length], dtype=torch.long),
-            torch.tensor(attention_mask[: self.max_length], dtype=torch.long),
-            torch.tensor(labels[: self.max_length], dtype=torch.long),
-        )
-
-
-def _device(name: str):
-    if name != "auto":
-        return torch.device(name)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-def evaluate(model, loader, device):
+def teacher_forced_loss(model, loader, device) -> float:
     model.eval()
     total, n = 0.0, 0
     with torch.no_grad():
         for input_ids, attention_mask, labels in loader:
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-            labels = labels.to(device)
+            input_ids, attention_mask, labels = (
+                input_ids.to(device), attention_mask.to(device), labels.to(device)
+            )
             loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels).loss
             total += loss.item() * len(input_ids)
             n += len(input_ids)
@@ -101,17 +52,25 @@ def main():
     ap.add_argument("--train-limit", type=int, default=2000)
     ap.add_argument("--val-limit", type=int, default=300)
     ap.add_argument("--max-length", type=int, default=1024)
-    ap.add_argument("--max-action-tokens", type=int, default=128)
+    ap.add_argument("--max-action-tokens", type=int, default=64)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--grad-accum", type=int, default=8)
-    ap.add_argument("--epochs", type=int, default=1)
+    ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--lr", type=float, default=5e-5)
+    ap.add_argument("--warmup-ratio", type=float, default=0.05)
+    ap.add_argument("--weight-decay", type=float, default=0.01)
+    ap.add_argument("--grad-clip", type=float, default=1.0)
+    ap.add_argument("--metric-eval-limit", type=int, default=200,
+                    help="How many val examples to GENERATE on each epoch (slow).")
+    ap.add_argument("--early-stop-patience", type=int, default=2)
     ap.add_argument("--out-dir", default="runs/weblinx/gpt2")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
     AutoModelForCausalLM, AutoTokenizer = require_transformers()
-    device = _device(args.device)
+    from transformers import get_cosine_schedule_with_warmup
+
+    device = pick_device(args.device)
 
     print("Loading tokenizer/model...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -120,67 +79,82 @@ def main():
     model.config.pad_token_id = tokenizer.pad_token_id
     model.to(device)
 
-    print("Loading WebLINX pairs...")
-    train_pairs = load_pairs(args.train_split, args.train_limit, args.dataset)
-    val_pairs = load_pairs(args.val_split, args.val_limit, args.dataset)
-    train_ds = GPT2WebLinxDataset(
-        train_pairs, tokenizer, args.max_length, args.max_action_tokens
-    )
-    val_ds = GPT2WebLinxDataset(
-        val_pairs, tokenizer, args.max_length, args.max_action_tokens
-    )
+    print("Loading WebLINX examples...")
+    train_ex = load_examples(args.train_split, args.train_limit, args.dataset)
+    val_ex = load_examples(args.val_split, args.val_limit, args.dataset)
+    train_ds = GPT2WebLinxDataset(train_ex, tokenizer, args.max_length, args.max_action_tokens)
+    val_ds = GPT2WebLinxDataset(val_ex, tokenizer, args.max_length, args.max_action_tokens)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    steps_per_epoch = math.ceil(len(train_loader) / args.grad_accum)
+    total_steps = max(1, steps_per_epoch * args.epochs)
+    sched = get_cosine_schedule_with_warmup(
+        opt, int(total_steps * args.warmup_ratio), total_steps
+    )
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    best = float("inf")
-    step = 0
+    best_score, best_epoch, micro_step = -1.0, -1, 0
 
     print(
         f"Device: {device} | model={args.model_name} | train={len(train_ds)} "
-        f"val={len(val_ds)} | batch={args.batch_size} grad_accum={args.grad_accum}"
+        f"val={len(val_ds)} | batch={args.batch_size} grad_accum={args.grad_accum} "
+        f"| optim_steps={total_steps}"
     )
     for epoch in range(args.epochs):
         model.train()
         total, n = 0.0, 0
         opt.zero_grad()
         pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{args.epochs}", leave=False)
-        for input_ids, attention_mask, labels in pbar:
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-            labels = labels.to(device)
-            loss = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            ).loss
+        for i, (input_ids, attention_mask, labels) in enumerate(pbar):
+            input_ids, attention_mask, labels = (
+                input_ids.to(device), attention_mask.to(device), labels.to(device)
+            )
+            loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels).loss
             (loss / args.grad_accum).backward()
             total += loss.item() * len(input_ids)
             n += len(input_ids)
-            step += 1
-            if step % args.grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if (i + 1) % args.grad_accum == 0 or (i + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 opt.step()
+                sched.step()
                 opt.zero_grad()
-            pbar.set_postfix(loss=f"{loss.item():.3f}")
-        if step % args.grad_accum != 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            opt.zero_grad()
+                micro_step += 1
+            pbar.set_postfix(loss=f"{loss.item():.3f}", lr=f"{sched.get_last_lr()[0]:.2e}")
 
-        val_loss = evaluate(model, val_loader, device)
-        train_loss = total / max(n, 1)
-        print(f"epoch {epoch + 1:3d} | train_loss {train_loss:.4f} | val_loss {val_loss:.4f}")
-        if math.isfinite(val_loss) and val_loss < best:
-            best = val_loss
+        # --- evaluate: teacher-forced loss + GENERATED task metric ---
+        val_loss = teacher_forced_loss(model, val_loader, device)
+        preds, golds = generate_predictions(
+            model, tokenizer, val_ex, device,
+            max_new_tokens=args.max_action_tokens, max_length=args.max_length,
+            max_action_tokens=args.max_action_tokens, limit=args.metric_eval_limit,
+        )
+        report = aggregate(preds, golds)
+        print(
+            f"epoch {epoch + 1:3d} | train_loss {total / max(n, 1):.4f} | "
+            f"val_loss {val_loss:.4f} | OVERALL {report.overall:.3f} | "
+            f"intent {report.intent_acc:.3f} | elem {report.element_acc:.3f} | "
+            f"chrF {report.text_chrf:.3f}"
+        )
+
+        if report.overall > best_score:
+            best_score, best_epoch = report.overall, epoch
             model.save_pretrained(out_dir)
             tokenizer.save_pretrained(out_dir)
-    if best < float("inf"):
-        print(f"Saved best GPT-2 checkpoint to {out_dir} (val_loss {best:.4f})")
+            payload = report.to_dict()
+            payload.update({"epoch": epoch + 1, "val_loss": val_loss})
+            (out_dir / "eval_report.json").write_text(json.dumps(payload, indent=2))
+            print(f"  ✓ new best OVERALL {best_score:.3f} -> saved to {out_dir}")
+        elif epoch - best_epoch >= args.early_stop_patience:
+            print(f"Early stop: no OVERALL improvement for {args.early_stop_patience} epochs.")
+            break
+
+    if best_epoch >= 0:
+        print(f"Done. Best OVERALL {best_score:.3f} at epoch {best_epoch + 1} -> {out_dir}")
     else:
-        print("No finite validation loss produced; no GPT-2 checkpoint was saved.")
+        print("No checkpoint saved (no successful epoch).")
 
 
 if __name__ == "__main__":

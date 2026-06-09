@@ -98,24 +98,26 @@ uv run python -m weblinx_il.inspect --split validation --n 2
 # Train a small prompt -> action string baseline on a subset.
 uv run python -m weblinx_il.train --train-limit 2000 --val-limit 300
 
-# Fine-tune GPT-2 on WebLINX action strings.
+# Fine-tune GPT-2 on WebLINX, checkpointing on the real task metric.
 uv run python -m weblinx_il.train_gpt2 \
-  --train-limit 2000 \
-  --val-limit 300 \
-  --epochs 1 \
+  --train-limit 20000 \
+  --val-limit 1000 \
+  --epochs 3 \
   --batch-size 2 \
-  --grad-accum 8
+  --grad-accum 8 \
+  --metric-eval-limit 300
 
 # Try one prompt after training.
 uv run python -m weblinx_il.predict_gpt2 \
   --checkpoint runs/weblinx/gpt2 \
   --prompt "Instructor: open the shopping cart. Current page: product page."
 
-# Evaluate the GPT-2 checkpoint on held-out WebLINX records.
-uv run python -m weblinx_il.evaluate \
+# Evaluate with deployment-grade metrics (intent / element / text / overall).
+uv run python -m weblinx_il.evaluate_gpt2 \
   --checkpoint runs/weblinx/gpt2 \
   --split validation \
-  --limit 300
+  --limit 500 \
+  --report-out runs/weblinx/report.json
 
 # Watch the GPT-2 action model control a visible Chrome browser.
 uv run python -m weblinx_il.live_browser \
@@ -124,11 +126,28 @@ uv run python -m weblinx_il.live_browser \
   --instruction "Search for biotechnology"
 ```
 
-This first WebLINX path is text/action-only. The GPT-2 trainer uses the WebLINX
-state/history/candidates prompt and fine-tunes GPT-2 to complete the next action
-string. The live browser controller opens Chrome, extracts visible DOM
-candidates, predicts a WebLINX-style action, and executes supported actions such
-as `click`, `text_input`, and `load`.
+### How accuracy is measured (and optimized)
+
+Training and evaluation share one prompt template, one action parser, and one
+candidate-aware truncation path (`gpt2_common.py`, `data.py`, `actions.py`), so
+the model is graded the way it will be deployed. `metrics.py` reports:
+
+- **intent match** — right action type (`click` / `text_input` / `load` / …),
+- **element accuracy** — for element actions, the right `uid` was selected,
+- **text chrF** — character F-score for `text_input` / `say` text,
+- **overall** — per-turn `intent_match × argument_score`, averaged.
+
+`train_gpt2.py` *generates* actions on the validation set each epoch and
+**checkpoints on the overall score** (not loss), with warmup→cosine LR and early
+stopping. The live controller validates the predicted `uid` against the real
+on-page candidates and snaps near-misses, so a near-correct prediction still
+grounds to the right element instead of failing silently.
+
+> Tip: a fast pipeline smoke (no real accuracy, just plumbing) is
+> `--model-name sshleifer/tiny-gpt2 --train-limit 40 --val-limit 16 --epochs 1`.
+
+The older char-GRU baseline (`train.py`, `predict.py`, `--checkpoint *.pt` in
+`live_browser`) is kept for comparison but is much weaker than the GPT-2 path.
 
 ## Layout
 

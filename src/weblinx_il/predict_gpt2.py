@@ -5,7 +5,7 @@ import argparse
 
 import torch
 
-from .train_gpt2 import ACTION_PREFIX, require_transformers
+from .gpt2_common import generate_action, pick_device, require_transformers
 
 
 def main():
@@ -17,31 +17,17 @@ def main():
     args = ap.parse_args()
 
     AutoModelForCausalLM, AutoTokenizer = require_transformers()
-    if args.device == "auto":
-        device = torch.device(
-            "cuda" if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available()
-            else "cpu"
-        )
-    else:
-        device = torch.device(args.device)
+    device = pick_device(args.device)
 
     tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
     tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.checkpoint).to(device).eval()
 
-    text = args.prompt.strip() + ACTION_PREFIX
-    inputs = tokenizer(text, return_tensors="pt").to(device)
-    with torch.no_grad():
-        out = model.generate(
-            **inputs,
-            max_new_tokens=args.max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    generated = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-    print(generated.strip())
+    action = generate_action(
+        model, tokenizer, args.prompt.strip(), device,
+        max_new_tokens=args.max_new_tokens, max_action_tokens=args.max_new_tokens,
+    )
+    print(action)
 
 
 if __name__ == "__main__":
