@@ -29,23 +29,20 @@ Requires Google Chrome (Selenium drives it). On macOS:
 `brew install --cask google-chrome`.
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+uv sync
 ```
 
 ## Run
 
-All commands set `PYTHONPATH=src` so the `il` package resolves.
-
 ```bash
 # 1. Collect demonstrations (writes data/demos/*.npz)
-PYTHONPATH=src .venv/bin/python -m il.collect
+uv run python -m il.collect
 
 # 2. Train the BC click policy (writes runs/bc/best.pt)
-PYTHONPATH=src .venv/bin/python -m il.train
+uv run python -m il.train
 
 # 3. Evaluate live in the browser
-PYTHONPATH=src .venv/bin/python -m il.evaluate
+uv run python -m il.evaluate
 ```
 
 Configuration lives in `configs/default.yaml` (tasks, episode counts, model
@@ -74,13 +71,13 @@ then trains a policy to draw the target image from a blank canvas.
 
 ```bash
 # Create a few synthetic drawing "video" GIFs.
-PYTHONPATH=src .venv/bin/python -m drawing_il.make_demos
+uv run python -m drawing_il.make_demos
 
 # Train from those GIFs.
-PYTHONPATH=src .venv/bin/python -m drawing_il.train
+uv run python -m drawing_il.train
 
 # Roll out the learned drawing policy into a GIF.
-PYTHONPATH=src .venv/bin/python -m drawing_il.rollout --target data/drawing/videos/circle.gif
+uv run python -m drawing_il.rollout --target data/drawing/videos/circle.gif
 ```
 
 You can replace `data/drawing/videos/*.gif` with your own simple drawing GIFs
@@ -96,13 +93,13 @@ WebLINX records.
 
 ```bash
 # Inspect raw WebLINX records and fields.
-PYTHONPATH=src .venv/bin/python -m weblinx_il.inspect --split validation --n 2
+uv run python -m weblinx_il.inspect --split validation --n 2
 
 # Train a small prompt -> action string baseline on a subset.
-PYTHONPATH=src .venv/bin/python -m weblinx_il.train --train-limit 2000 --val-limit 300
+uv run python -m weblinx_il.train --train-limit 2000 --val-limit 300
 
 # Try one prompt after training.
-PYTHONPATH=src .venv/bin/python -m weblinx_il.predict \
+uv run python -m weblinx_il.predict \
   --prompt "Instructor: open the shopping cart. Current page: product page."
 ```
 
