@@ -1,0 +1,56 @@
+# Behavioral Cloning on MiniWoB++ — default config
+
+seed: 0
+
+# --- Tasks to learn (click-based MiniWoB++ subtasks) ---
+# These are solvable by a scripted oracle that clicks a single DOM target.
+tasks:
+  - click-test       # "Click the button."
+  - click-test-2     # "Click button ONE/TWO."
+  - click-button     # 'Click on the "<text>" button.'
+  - click-link       # 'Click on the link "<text>".'
+
+# --- Demonstration collection ---
+collect:
+  episodes_per_task: 200      # demonstration episodes per task
+  max_steps: 8                # safety cap on steps per episode
+  out_dir: data/demos
+  headless: true
+
+# --- Observation / image ---
+image:
+  # MiniWoB renders a 160x210 screen; we resize for the CNN.
+  height: 210
+  width: 160
+  resize_to: 128              # square resize fed to the CNN
+
+# --- Model ---
+model:
+  heatmap_size: 16            # click-location grid (resize_to downsampled)
+  channels: [48, 96, 192, 256]
+  text_emb: 48                # char embedding dim (instruction encoder)
+  text_hidden: 96             # GRU hidden dim; FiLM-conditions the CNN features
+  head_dropout: 0.15
+
+# --- Training ---
+train:
+  data_dir: data/demos
+  val_frac: 0.1
+  batch_size: 64
+  epochs: 100
+  early_stop_patience: 12     # stop if checkpoint_metric hasn't improved for N epochs
+  checkpoint_metric: exact    # loss, exact, or within-1
+  lr: 0.0003
+  weight_decay: 0.0002
+  label_smoothing: 0.05
+  num_workers: 0
+  device: auto                # auto -> mps if available, else cpu
+  out_dir: runs/bc
+  log_every: 20
+
+# --- Evaluation (live in the browser) ---
+eval:
+  episodes_per_task: 50
+  max_steps: 8
+  headless: true
+  checkpoint: runs/bc/best.pt

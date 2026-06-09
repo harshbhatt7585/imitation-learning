@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Data & artifacts
+data/demos/
+data/*.npz
+runs/
+checkpoints/
+*.ckpt
+*.pt
+
+# OS
+.DS_Store
