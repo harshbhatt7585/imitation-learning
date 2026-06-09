@@ -131,6 +131,7 @@ def main():
             max_new_tokens=args.max_action_tokens, max_length=args.max_length,
             max_action_tokens=args.max_action_tokens, limit=args.metric_eval_limit,
         )
+        print("Predictions::", preds)
         report = aggregate(preds, golds)
         print(
             f"epoch {epoch + 1:3d} | train_loss {total / max(n, 1):.4f} | "
