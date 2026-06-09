@@ -116,13 +116,19 @@ uv run python -m weblinx_il.evaluate \
   --checkpoint runs/weblinx/gpt2 \
   --split validation \
   --limit 300
+
+# Watch the GPT-2 action model control a visible Chrome browser.
+uv run python -m weblinx_il.live_browser \
+  --checkpoint runs/weblinx/gpt2 \
+  --url "https://www.encyclopedia.com/" \
+  --instruction "Search for biotechnology"
 ```
 
 This first WebLINX path is text/action-only. The GPT-2 trainer uses the WebLINX
 state/history/candidates prompt and fine-tunes GPT-2 to complete the next action
-string. The full WebLINX setup can also use screenshots, HTML, candidates, and
-browser execution; those are the next steps after validating the action-string
-baseline.
+string. The live browser controller opens Chrome, extracts visible DOM
+candidates, predicts a WebLINX-style action, and executes supported actions such
+as `click`, `text_input`, and `load`.
 
 ## Layout
 
