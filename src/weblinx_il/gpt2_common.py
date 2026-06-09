@@ -105,7 +105,6 @@ class GPT2WebLinxDataset(Dataset):
     def __getitem__(self, idx: int):
         ex = self.examples[idx]
         prompt_text = self.prompt_text(idx)
-        print("Prompt Text:", prompt_text)
         input_ids, labels = build_input_ids(
             prompt_text, ex["target"], self.tokenizer, self.max_length, self.max_action_tokens
         )
