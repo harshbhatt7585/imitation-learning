@@ -30,6 +30,9 @@ Requires Google Chrome (Selenium drives it). On macOS:
 
 ```bash
 uv sync
+
+# Optional: download a local 0.5B model for WebLINX fine-tuning.
+uv run python scripts/download_model.py --preset qwen-0.5b
 ```
 
 ## Run
