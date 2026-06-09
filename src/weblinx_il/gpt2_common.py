@@ -159,6 +159,7 @@ def generate_predictions(
             model, tokenizer, prompt_text, device, max_new_tokens,
             max_length, max_action_tokens,
         )
+        print("Predictions: ", pred)
         preds.append(pred)
         golds.append(ex["target"])
     return preds, golds
