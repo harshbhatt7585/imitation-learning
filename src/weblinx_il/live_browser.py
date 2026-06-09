@@ -31,11 +31,21 @@ class ActionPredictor:
 
 
 class GPT2Predictor(ActionPredictor):
-    def __init__(self, checkpoint: str, device: torch.device, max_length: int = 1024):
+    def __init__(
+        self,
+        checkpoint: str,
+        device: torch.device,
+        max_length: int = 1024,
+        trust_remote_code: bool = False,
+    ):
         AutoModelForCausalLM, AutoTokenizer = require_transformers()
-        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            checkpoint, trust_remote_code=trust_remote_code
+        )
         self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device).eval()
+        self.model = AutoModelForCausalLM.from_pretrained(
+            checkpoint, trust_remote_code=trust_remote_code
+        ).to(device).eval()
         self.device = device
         self.max_length = max_length
 
@@ -69,13 +79,15 @@ class GRUPredictor(ActionPredictor):
         return decode(out.tolist(), self.inv_vocab)
 
 
-def load_predictor(checkpoint: str, device: torch.device) -> ActionPredictor:
+def load_predictor(
+    checkpoint: str, device: torch.device, trust_remote_code: bool = False
+) -> ActionPredictor:
     path = Path(checkpoint)
     if path.is_file() or checkpoint.endswith(".pt"):
         print(f"Loading GRU action model from {checkpoint}")
         return GRUPredictor(checkpoint, device)
     print(f"Loading GPT-2 action model from {checkpoint}")
-    return GPT2Predictor(checkpoint, device)
+    return GPT2Predictor(checkpoint, device, trust_remote_code=trust_remote_code)
 
 
 def make_driver(headless: bool):
@@ -139,17 +151,54 @@ return out;
 
 
 def get_candidates(driver, limit: int):
-    """Return (candidates_text, uid_list) in the WebLINX candidate format."""
-    rows = driver.execute_script(_COLLECT_JS, limit)
+    """Return (candidates_text, uid_list, candidate_rows) in WebLINX format."""
+    rows = driver.execute_script(_COLLECT_JS, max(limit * 3, limit))
+    rows = rank_candidates(rows, limit)
     lines, uids = [], []
-    for r in rows:
-        uids.append(r["uid"])
+    for i, r in enumerate(rows):
+        uid = f"e{i}"
+        driver.execute_script(
+            "document.querySelector('[data-agent-uid=\"' + arguments[0] + '\"]')"
+            ".setAttribute('data-agent-uid', arguments[1]);",
+            r["uid"],
+            uid,
+        )
+        uids.append(uid)
         lines.append(
-            f"(uid = {r['uid']}) [[tag]] {r['tag']} [[xpath]] {r['xpath']} "
+            f"(uid = {uid}) [[tag]] {r['tag']} [[xpath]] {r['xpath']} "
             f"[[bbox]] x={r['x']} y={r['y']} width={r['width']} height={r['height']} "
             f"[[attributes]] {r['attrs']} [[text]] {r['text']}"
         )
-    return "\n".join(lines), uids
+        r["uid"] = uid
+    return "\n".join(lines), uids, rows
+
+
+def rank_candidates(rows: list[dict], limit: int) -> list[dict]:
+    """Put likely task-relevant controls before generic nav/footer links."""
+    def score(r: dict) -> tuple:
+        text = f"{r.get('text', '')} {r.get('attrs', '')}".lower()
+        tag = r.get("tag", "")
+        y = int(r.get("y", 0))
+        width = int(r.get("width", 0))
+        height = int(r.get("height", 0))
+        s = 0
+        if tag in {"input", "textarea", "select"}:
+            s += 80
+        if "type='search'" in text or "search" in text:
+            s += 60
+        if "type='search'" in text:
+            s += 30
+        if "placeholder" in text:
+            s += 20
+        if tag == "button" or "type='submit'" in text or "role='button'" in text:
+            s += 10
+        if any(bad in text for bad in ["privacy", "terms", "footer", "sign up", "email address"]):
+            s -= 50
+        if width * height < 300:
+            s -= 10
+        return (-s, y)
+
+    return sorted(rows, key=score)[:limit]
 
 
 def make_prompt(driver, instruction: str, history: list[str], candidates: str) -> str:
@@ -158,20 +207,59 @@ def make_prompt(driver, instruction: str, history: list[str], candidates: str) -
     return build_prompt(viewport, instruction, " ".join(history[-8:]), candidates)
 
 
-def ground_uid(action: Action, uids: list[str]) -> str | None:
+def fallback_uid(action: Action, candidates: list[dict], instruction: str) -> str | None:
+    """Pick a plausible candidate when text generation emits an invalid uid."""
+    inst = instruction.lower()
+
+    def score(r: dict) -> tuple:
+        text = f"{r.get('text', '')} {r.get('attrs', '')}".lower()
+        tag = r.get("tag", "")
+        s = 0
+        if action.intent in {"text_input", "paste", "change"}:
+            if tag in {"input", "textarea"}:
+                s += 100
+            if "type='search'" in text or "search" in text:
+                s += 80
+            if "placeholder" in text:
+                s += 20
+        elif action.intent in {"click", "submit"}:
+            # If the instruction says search and an empty search box exists, click it first.
+            if "search" in inst and tag in {"input", "textarea"}:
+                s += 90
+            if "type='search'" in text:
+                s += 80
+            if "type='search'" in text or "search" in text:
+                s += 70
+            if tag == "button" or "type='submit'" in text:
+                s += 15
+        if any(bad in text for bad in ["read more", "privacy", "terms", "sign up", "email address"]):
+            s -= 80
+        return (-s, int(r.get("y", 0)))
+
+    if not candidates:
+        return None
+    best = sorted(candidates, key=score)[0]
+    return best.get("uid")
+
+
+def ground_uid(
+    action: Action, uids: list[str], candidates: list[dict], instruction: str
+) -> str | None:
     """Snap the predicted uid to a real candidate, or None if impossible."""
     if action.uid is None:
-        return None
+        return fallback_uid(action, candidates, instruction)
     if action.uid in uids:
         return action.uid
     # near-miss: predicted uid is a prefix/substring of a real candidate (or v.v.)
     for u in uids:
         if action.uid in u or u in action.uid:
             return u
-    return None
+    return fallback_uid(action, candidates, instruction)
 
 
-def execute_action(driver, action: Action, uids: list[str]) -> bool:
+def execute_action(
+    driver, action: Action, uids: list[str], candidates: list[dict], instruction: str
+) -> bool:
     if action.intent == "load" and action.url:
         driver.get(action.url)
         return True
@@ -183,7 +271,7 @@ def execute_action(driver, action: Action, uids: list[str]) -> bool:
     if action.intent in {"click", "text_input", "paste", "submit", "change"}:
         from selenium.webdriver.common.by import By
 
-        uid = ground_uid(action, uids)
+        uid = ground_uid(action, uids, candidates, instruction)
         if uid is None:
             print(f"  ! predicted uid {action.uid!r} is not a real candidate; stopping.")
             return False
@@ -218,23 +306,30 @@ def main():
     ap.add_argument("--instruction", required=True)
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--candidate-limit", type=int, default=40)
+    ap.add_argument("--show-prompt", action="store_true")
     ap.add_argument("--max-new-tokens", type=int, default=64)
     ap.add_argument("--pause", type=float, default=1.0)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--trust-remote-code", action="store_true")
     args = ap.parse_args()
 
     device = pick_device(args.device)
-    predictor = load_predictor(args.checkpoint, device)
+    predictor = load_predictor(args.checkpoint, device, args.trust_remote_code)
     driver = make_driver(headless=args.headless)
-    history = [f'load(url="{args.url}")']
+    history = [
+        f'say(speaker="instructor", utterance="{args.instruction}")',
+        f'load(url="{args.url}")',
+    ]
 
     try:
         driver.get(args.url)
         for step in range(args.steps):
             time.sleep(args.pause)
-            candidates, uids = get_candidates(driver, args.candidate_limit)
+            candidates, uids, candidate_rows = get_candidates(driver, args.candidate_limit)
             prompt = make_prompt(driver, args.instruction, history, candidates)
+            if args.show_prompt:
+                print(f"\nPROMPT step {step + 1}:\n{prompt}\n")
             raw = predictor.predict(prompt, args.max_new_tokens)
             action = parse_action(raw)
             print(f"\nstep {step + 1}/{args.steps}")
@@ -242,8 +337,8 @@ def main():
             if action is None:
                 print("  ! could not parse an action; stopping.")
                 break
-            history.append(repr(action))
-            if not execute_action(driver, action, uids):
+            history.append(action.to_weblinx())
+            if not execute_action(driver, action, uids, candidate_rows, args.instruction):
                 break
     finally:
         if args.headless:

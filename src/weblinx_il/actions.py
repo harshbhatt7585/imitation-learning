@@ -50,6 +50,10 @@ def _unescape(value: str) -> str:
     return value.encode("utf-8").decode("unicode_escape") if "\\" in value else value
 
 
+def _quote(value: str) -> str:
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 @dataclass
 class Action:
     """A parsed WebLINX action."""
@@ -81,6 +85,18 @@ class Action:
     def __repr__(self) -> str:  # concise, for logs
         inner = ", ".join(f"{k}={v!r}" for k, v in self.args.items())
         return f"{self.intent}({inner})"
+
+    def to_weblinx(self) -> str:
+        """Canonical WebLINX action string with double-quoted string args."""
+        parts = []
+        for key, value in self.args.items():
+            if value is None:
+                parts.append(f"{key}=None")
+            elif re.fullmatch(r"[-+]?\d+(?:\.\d+)?", str(value)):
+                parts.append(f"{key}={value}")
+            else:
+                parts.append(f"{key}={_quote(value)}")
+        return f"{self.intent}({', '.join(parts)})"
 
 
 def parse_action(raw: str) -> Optional[Action]:

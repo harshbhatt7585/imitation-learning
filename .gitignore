@@ -9,8 +9,10 @@ data/demos/
 data/*.npz
 runs/
 checkpoints/
+models/
 *.ckpt
 *.pt
 
 # OS
 .DS_Store
+models/

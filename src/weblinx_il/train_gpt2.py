@@ -44,9 +44,10 @@ def teacher_forced_loss(model, loader, device) -> float:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Fine-tune GPT-2 on WebLINX actions.")
+    ap = argparse.ArgumentParser(description="Fine-tune a causal LM on WebLINX actions.")
     ap.add_argument("--dataset", default=DATASET_ID)
     ap.add_argument("--model-name", default="gpt2")
+    ap.add_argument("--trust-remote-code", action="store_true")
     ap.add_argument("--train-split", default="train")
     ap.add_argument("--val-split", default="validation")
     ap.add_argument("--train-limit", type=int, default=2000)
@@ -73,9 +74,13 @@ def main():
     device = pick_device(args.device)
 
     print("Loading tokenizer/model...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name, trust_remote_code=args.trust_remote_code
+    )
     tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, trust_remote_code=args.trust_remote_code
+    )
     model.config.pad_token_id = tokenizer.pad_token_id
     model.to(device)
 

@@ -113,10 +113,23 @@ uv run python -m weblinx_il.train_gpt2 \
   --grad-accum 8 \
   --metric-eval-limit 300
 
-# Try one prompt after training.
+# Use a different Hugging Face causal LM, such as an HRM text checkpoint.
+uv run python -m weblinx_il.train_gpt2 \
+  --model-name <hf-org-or-user>/<hrm-text-checkpoint> \
+  --trust-remote-code \
+  --out-dir runs/weblinx/hrm-text \
+  --train-limit 20000 \
+  --val-limit 1000 \
+  --epochs 3 \
+  --batch-size 2 \
+  --grad-accum 8
+
+# Predict one action by opening a URL and scraping candidates into the prompt.
 uv run python -m weblinx_il.predict_gpt2 \
   --checkpoint runs/weblinx/gpt2 \
-  --prompt "Instructor: open the shopping cart. Current page: product page."
+  --url "https://www.encyclopedia.com/" \
+  --instruction "Search for biotechnology" \
+  --show-prompt
 
 # Evaluate with deployment-grade metrics (intent / element / text / overall).
 uv run python -m weblinx_il.evaluate_gpt2 \
@@ -127,9 +140,11 @@ uv run python -m weblinx_il.evaluate_gpt2 \
 
 # Watch the GPT-2 action model control a visible Chrome browser.
 uv run python -m weblinx_il.live_browser \
-  --checkpoint runs/weblinx/gpt2 \
+  --checkpoint runs/weblinx/hrm-text \
+  --trust-remote-code \
   --url "https://www.encyclopedia.com/" \
-  --instruction "Search for biotechnology"
+  --instruction "Search for biotechnology" \
+  --show-prompt
 ```
 
 ### How accuracy is measured (and optimized)

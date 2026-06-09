@@ -43,6 +43,7 @@ def perplexity(model, loader, device) -> float:
 def main():
     ap = argparse.ArgumentParser(description="Evaluate GPT-2 WebLINX agent (real metrics).")
     ap.add_argument("--checkpoint", default="runs/weblinx/gpt2")
+    ap.add_argument("--trust-remote-code", action="store_true")
     ap.add_argument("--dataset", default=DATASET_ID)
     ap.add_argument("--split", default="validation")
     ap.add_argument("--limit", type=int, default=300)
@@ -57,9 +58,13 @@ def main():
 
     AutoModelForCausalLM, AutoTokenizer = require_transformers()
     device = pick_device(args.device)
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.checkpoint, trust_remote_code=args.trust_remote_code
+    )
     tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.checkpoint).to(device).eval()
+    model = AutoModelForCausalLM.from_pretrained(
+        args.checkpoint, trust_remote_code=args.trust_remote_code
+    ).to(device).eval()
 
     examples = load_examples(args.split, args.limit, args.dataset)
     print(f"Generating actions for {len(examples)} held-out turns on {device}...")
