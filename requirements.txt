@@ -4,6 +4,7 @@ pillow
 pyyaml
 tqdm
 datasets
+transformers
 selenium
 gymnasium
 miniwob

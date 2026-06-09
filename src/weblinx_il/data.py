@@ -41,9 +41,6 @@ def record_to_prompt_target(record: dict) -> tuple[str, str] | None:
             f"History: {_stringify(record.get('action_history'))}",
             f"Candidates: {_stringify(record.get('candidates'))}",
         ]
-        clean_html = _stringify(record.get("clean_html"))
-        if clean_html:
-            pieces.append(f"HTML: {clean_html}")
         prompt = "\n".join(pieces)
     target = (
         record.get("output_target")

@@ -98,14 +98,31 @@ uv run python -m weblinx_il.inspect --split validation --n 2
 # Train a small prompt -> action string baseline on a subset.
 uv run python -m weblinx_il.train --train-limit 2000 --val-limit 300
 
+# Fine-tune GPT-2 on WebLINX action strings.
+uv run python -m weblinx_il.train_gpt2 \
+  --train-limit 2000 \
+  --val-limit 300 \
+  --epochs 1 \
+  --batch-size 2 \
+  --grad-accum 8
+
 # Try one prompt after training.
-uv run python -m weblinx_il.predict \
+uv run python -m weblinx_il.predict_gpt2 \
+  --checkpoint runs/weblinx/gpt2 \
   --prompt "Instructor: open the shopping cart. Current page: product page."
+
+# Evaluate the GPT-2 checkpoint on held-out WebLINX records.
+uv run python -m weblinx_il.evaluate \
+  --checkpoint runs/weblinx/gpt2 \
+  --split validation \
+  --limit 300
 ```
 
-This first WebLINX path is text/action-only. The full WebLINX setup can also use
-screenshots, HTML, candidates, and browser execution; those are the next steps
-after validating the action-string baseline.
+This first WebLINX path is text/action-only. The GPT-2 trainer uses the WebLINX
+state/history/candidates prompt and fine-tunes GPT-2 to complete the next action
+string. The full WebLINX setup can also use screenshots, HTML, candidates, and
+browser execution; those are the next steps after validating the action-string
+baseline.
 
 ## Layout
 
