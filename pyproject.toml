@@ -24,6 +24,17 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = [
     "src/il",
-    "src/drawing_il",
-    "src/weblinx_il",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.gitignore",
+    "/README.md",
+    "/configs",
+    "/data/drawing/videos",
+    "/pyproject.toml",
+    "/requirements.txt",
+    "/scripts",
+    "/src/il",
+    "/uv.lock",
 ]
